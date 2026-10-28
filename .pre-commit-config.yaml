@@ -1,0 +1,84 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check-yaml
+        name: check yaml
+        entry: uv run check-yaml
+        language: system
+        types: [yaml]
+      - id: check-toml
+        name: check toml
+        entry: uv run check-toml
+        language: system
+        types: [toml]
+      - id: check-json
+        name: check json
+        entry: uv run check-json
+        language: system
+        types: [json]
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+        entry: uv run trailing-whitespace-fixer
+        language: system
+        types: [text]
+      - id: end-of-file-fixer
+        name: fix final newline
+        entry: uv run end-of-file-fixer
+        language: system
+        types: [text]
+      - id: check-merge-conflict
+        name: check merge conflict markers
+        entry: uv run check-merge-conflict
+        language: system
+      - id: detect-private-key
+        name: detect private keys
+        entry: uv run detect-private-key
+        language: system
+        types: [text]
+      - id: detect-secrets
+        name: detect secrets
+        entry: uv run detect-secrets-hook
+        language: system
+        types: [text]
+      - id: check-added-large-files
+        name: prevent oversized files
+        entry: uv run check-added-large-files
+        args: ["--maxkb=1024"]
+        language: system
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ty-check
+        name: ty check
+        entry: uv run ty check
+        language: system
+        pass_filenames: false
+        types: [python]
+      - id: markdown-lint
+        name: markdown lint
+        entry: uv run pymarkdown --config .pymarkdown.json scan
+        language: system
+        types: [markdown]
+        # templates/content/ holds prose fragments, not documents: they have no
+        # title of their own because the generator emits the heading from
+        # policy/shapes.yaml. Linting them as standalone files reports MD041 on
+        # every one. The rendered documents they produce are linted normally.
+        exclude: ^templates/content/
+      # Adopters pin the published hook to a release. This repository is the
+      # release, so it checks its own working tree — the same invocation its
+      # compliance workflow runs. CI skips it there; see .github/workflows.
+      - id: repo-check
+        name: repo-check
+        entry: uv run repo-check .
+        language: system
+        pass_filenames: false
+        always_run: true

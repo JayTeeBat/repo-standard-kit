@@ -1,0 +1,68 @@
+[project]
+name = "repo-standard-kit"
+version = "2.0.0"
+description = "Portable development standards, starter kits, and bootstrap tooling for software repositories."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "ruamel.yaml>=0.18.10",
+  "tomlkit>=0.13.3",
+]
+
+[project.scripts]
+repo-add-package = "repo_standard.repo_add_package:main"
+repo-adopt = "repo_standard.repo_adopt:main"
+repo-check = "repo_standard.compliance.cli:main"
+repo-init = "repo_standard.repo_init:main"
+
+[dependency-groups]
+dev = [
+  "detect-secrets>=1.5.0",
+  "pre-commit>=4.0.0",
+  "pre-commit-hooks>=5.0.0",
+  "pymarkdownlnt>=0.9.39",
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+  "ty>=0.0.1a16",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "repo_standard"
+source-include = [
+  "docs/**",
+  "policy/**",
+  "templates/**",
+]
+source-exclude = [
+  "**/.mypy_cache/**",
+  "**/.pytest_cache/**",
+  "**/.ruff_cache/**",
+  "**/.ty_cache/**",
+  "**/__pycache__/**",
+  "**/*.pyc",
+]
+
+[tool.repo-standard]
+profile = "python-single"
+standard = "2"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "PT"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.repo-check.ignore]
+RSK011 = "This repository defines, tests, and ships these placeholder tokens for repo-init's templating; they are not leftovers from an unfinished bootstrap."
+
+[tool.ty.src]
+include = ["src", "tests"]

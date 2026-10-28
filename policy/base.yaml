@@ -1,0 +1,618 @@
+schema_version: 1
+standard_version: 2.0.0
+standard_major: "2"
+retired_rule_ids:
+  - RSK013
+profile_files:
+  - profiles/python-single.yaml
+  - profiles/python-workspace.yaml
+shape_files:
+  - shapes.yaml
+rules:
+  - id: RSK001
+    title: AGENTS.md exists
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Repository Contract
+    enforcement: structural
+    check:
+      kind: path_exists
+      config:
+        path: AGENTS.md
+        path_type: file
+    rationale: Agents need one repository-local operating contract.
+    remediation: Add a root AGENTS.md tailored to the repository.
+
+  - id: RSK002
+    title: Required AGENTS.md sections are present and ordered
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Required `AGENTS.md` Sections
+    enforcement: structural
+    check:
+      kind: markdown_shape
+      config:
+        shape: agents
+    rationale: >-
+      Stable, consistently ordered headings make repository operating
+      boundaries discoverable.
+    remediation: >-
+      Add every required level-two heading to AGENTS.md in the order the agents
+      shape declares.
+
+  - id: RSK003
+    title: AGENTS.md states the exact quality-gate chain
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Required `AGENTS.md` Sections
+    enforcement: structural
+    check:
+      kind: agents_quality_commands
+      config:
+        path: AGENTS.md
+        commands_by_profile:
+          python-single:
+            - uv sync --locked
+            - uv run pre-commit run --all-files
+            - uv run pytest
+            - uv build
+          python-workspace:
+            - uv sync --locked
+            - uv run pre-commit run --all-files
+            - uv run pytest
+            - uv build --all-packages
+    rationale: Contributors need exact local commands that mirror CI.
+    remediation: List the complete ordered gate chain in AGENTS.md.
+
+  - id: RSK004
+    title: README.md exists
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Repository Contract
+    enforcement: structural
+    check:
+      kind: path_exists
+      config:
+        path: README.md
+        path_type: file
+    rationale: Users need a stable entry point for repository purpose and use.
+    remediation: Add a user-facing root README.md.
+
+  - id: RSK005
+    title: Standard references are present
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Repository Contract
+    enforcement: structural
+    check:
+      kind: text_pattern_each
+      config:
+        paths: [README.md, AGENTS.md]
+        pattern: repo-standard-kit
+    rationale: Explicit references make standards drift auditable.
+    remediation: Link repo-standard-kit from README.md and AGENTS.md.
+
+  - id: RSK006
+    title: Quality workflow executes the mandatory gate chain
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 5. CI Pull Request Gates
+    enforcement: structural
+    check:
+      kind: github_workflow_commands
+      config:
+        path: .github/workflows/quality.yml
+        job: quality
+        trigger: pull_request
+        commands_by_profile:
+          python-single:
+            - uv sync --locked
+            - uv run pre-commit run --all-files
+            - uv run pytest
+            - uv build
+          python-workspace:
+            - uv sync --locked
+            - uv run pre-commit run --all-files
+            - uv run pytest
+            - uv build --all-packages
+        guards_by_profile:
+          python-single: []
+          python-workspace:
+            - 'compgen -G "packages/*/pyproject.toml" > /dev/null'
+    rationale: Pull requests must execute the same reproducible gates as local work.
+    remediation: >-
+      Add the pull_request trigger, quality job, and complete commands, and
+      gate a command only with the condition policy declares for the profile.
+
+  - id: RSK007
+    title: Mandatory pre-commit hooks are configured structurally
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 4. Local Pre-Commit Gates
+    enforcement: structural
+    check:
+      kind: pre_commit_hooks
+      config:
+        path: .pre-commit-config.yaml
+        hooks:
+          - id: check-yaml
+            entry: uv run check-yaml
+            types: [yaml]
+          - id: check-toml
+            entry: uv run check-toml
+            types: [toml]
+          - id: check-json
+            entry: uv run check-json
+            types: [json]
+          - id: trailing-whitespace
+            entry: uv run trailing-whitespace-fixer
+            types: [text]
+          - id: end-of-file-fixer
+            entry: uv run end-of-file-fixer
+            types: [text]
+          - id: check-merge-conflict
+            entry: uv run check-merge-conflict
+          - id: detect-private-key
+            entry: uv run detect-private-key
+            types: [text]
+          - id: detect-secrets
+            entry: uv run detect-secrets-hook
+            types: [text]
+          - id: check-added-large-files
+            entry: uv run check-added-large-files
+            args: [--maxkb=1024]
+          - id: ruff-check
+            entry: uv run ruff check --fix --force-exclude
+            types_or: [python, pyi]
+            require_serial: true
+          - id: ruff-format
+            entry: uv run ruff format --force-exclude
+            types_or: [python, pyi]
+            require_serial: true
+          - id: ty-check
+            entry: uv run ty check
+            pass_filenames: false
+            types: [python]
+          - id: markdown-lint
+            entry: uv run pymarkdown --config .pymarkdown.json scan
+            types: [markdown]
+    rationale: Structural matching prevents comments or unrelated text from impersonating hooks.
+    remediation: Configure every required hook with the documented semantic fields.
+
+  - id: RSK008
+    title: Python packages prefer uv_build
+    level: recommended
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Repository Contract
+    enforcement: structural
+    check:
+      kind: uv_build_backend
+      config:
+        path: pyproject.toml
+        backend: uv_build
+        allow_missing_profiles: [python-workspace]
+    rationale: A preferred backend keeps generated repositories consistent without forcing migrations in established packages.
+    remediation: Prefer uv_build for new packages; retain another PEP 517 backend when migration would not preserve project behavior.
+
+  - id: RSK009
+    title: uv.lock exists
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Repository Contract
+    enforcement: structural
+    check:
+      kind: path_exists
+      config:
+        path: uv.lock
+        path_type: file
+    rationale: A committed lock file makes dependency resolution reproducible.
+    remediation: Run uv lock or uv sync and commit uv.lock.
+
+  - id: RSK010
+    title: Required Ruff baseline is declared
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 13. Formatting Baseline
+    enforcement: structural
+    check:
+      kind: ruff_baseline
+      config:
+        path: pyproject.toml
+        require_line_length: true
+        required_select: [E, F, I, B, UP]
+    rationale: Explicit formatting and lint families prevent invisible default drift.
+    remediation: Declare line-length and select E, F, I, B, and UP in Ruff config.
+
+  - id: RSK011
+    title: Bootstrap placeholders are fully rendered
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Repository Contract
+    enforcement: structural
+    check:
+      kind: no_placeholders
+      config:
+        placeholders:
+          __REPO_NAME__: repo_name
+          __PACKAGE_NAME__: package_name
+          __DESCRIPTION__: description
+          __REPO_TYPE__: repo_type
+          __PYTHON_VERSION__: python_version
+          __AUTHOR__: author
+          __LICENSE_NOTICE__: license_notice
+    rationale: Known starter placeholders indicate incomplete bootstrap output.
+    remediation: Replace every known starter placeholder with repository-specific text.
+
+  - id: RSK012
+    title: ADR directory exists
+    level: recommended
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-layout.md
+      section: Canonical Python Layout
+    enforcement: structural
+    check:
+      kind: path_exists
+      config:
+        path: docs/adr
+        path_type: directory
+    rationale: A stable ADR location encourages durable architecture records.
+    remediation: Add docs/adr/ and an ADR template or first decision record.
+
+  - id: RSK014
+    title: Main branch protection enforces quality and compliance
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 10. Enforcement
+    enforcement: platform
+    check:
+      kind: branch_protection
+      config:
+        branch: main
+        required_status_checks:
+          - quality
+          - compliance
+        minimum_reviews: 0
+        dismiss_stale_approvals: true
+        require_up_to_date: true
+        require_conversation_resolution: true
+        enforce_admins: true
+    rationale: >-
+      Quality proves the gate chain passes; compliance independently prevents
+      that chain and the rest of the standard from drifting unnoticed.
+    remediation: >-
+      Protect main with pull request protection, stale approval dismissal, strict
+      quality and compliance checks, conversation resolution, and administrator
+      enforcement.
+
+  - id: RSK015
+    title: Ruff line length uses the recommended baseline
+    level: advisory
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 13. Formatting Baseline
+    enforcement: structural
+    check:
+      kind: ruff_line_length
+      config:
+        path: pyproject.toml
+        value: 88
+    rationale: A shared width keeps formatting comparable across repositories.
+    remediation: Prefer line-length = 88 unless the repository has a reason to differ.
+
+  - id: RSK016
+    title: Ruff selects recommended pytest rules
+    level: recommended
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 13. Formatting Baseline
+    enforcement: structural
+    check:
+      kind: ruff_select
+      config:
+        path: pyproject.toml
+        values: [PT]
+    rationale: Pytest-style linting keeps tests idiomatic and consistent.
+    remediation: Add PT to tool.ruff.lint.select when compatible with the project.
+
+  - id: RSK017
+    title: CHANGELOG.md exists
+    level: recommended
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-layout.md
+      section: Canonical Python Layout
+    enforcement: structural
+    check:
+      kind: path_exists
+      config:
+        path: CHANGELOG.md
+        path_type: file
+    rationale: A changelog gives users a stable compatibility record.
+    remediation: Add CHANGELOG.md with an Unreleased section.
+
+  - id: RSK018
+    title: LICENSE exists
+    level: recommended
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-layout.md
+      section: Canonical Python Layout
+    enforcement: structural
+    check:
+      kind: path_exists
+      config:
+        path: LICENSE
+        path_type: file
+    rationale: Explicit license terms remove ambiguity for users and contributors.
+    remediation: Add the license text approved for the repository.
+
+  - id: RSK019
+    title: Repository declares its standard profile and major version
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Repository Contract
+    enforcement: structural
+    check:
+      kind: repo_metadata
+      config:
+        path: pyproject.toml
+        standard_major: "2"
+    rationale: Explicit metadata makes profile resolution stable as layouts evolve.
+    remediation: Add tool.repo-standard with a valid profile and standard = "2".
+
+  - id: RSK020
+    title: Quality workflow uses least-privilege permissions
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 5. CI Pull Request Gates
+    enforcement: structural
+    check:
+      kind: github_workflow_permissions
+      config:
+        path: .github/workflows/quality.yml
+        job: quality
+        permissions:
+          contents: read
+    rationale: >-
+      The quality job only needs read access to repository contents; additional
+      token scopes increase blast radius without supporting the gate chain.
+    remediation: >-
+      Set the quality job's effective permissions to exactly `contents: read`.
+
+  - id: RSK021
+    title: Quality workflow pins remote actions immutably
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 5. CI Pull Request Gates
+    enforcement: structural
+    check:
+      kind: github_workflow_pins
+      config:
+        path: .github/workflows/quality.yml
+    rationale: Full commit pins prevent upstream tag movement from changing trusted workflow code.
+    remediation: Pin every remote action and reusable workflow in the quality workflow to a 40-character SHA.
+
+  - id: RSK022
+    title: Main branch protection recommends an approving review
+    level: recommended
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 10. Enforcement
+    enforcement: platform
+    check:
+      kind: branch_protection_minimum_reviews
+      config:
+        branch: main
+        minimum_reviews: 1
+    rationale: An independent approval improves change review when another maintainer is available.
+    remediation: Require at least one approving review when repository staffing permits.
+
+  - id: RSK023
+    title: README.md follows the declared section shape
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: File Shapes
+    enforcement: structural
+    check:
+      kind: markdown_shape
+      config:
+        shape: readme
+    rationale: >-
+      A shared README spine lets a reader find purpose, install, use, and
+      licence terms in the same place in every adopting repository.
+    remediation: >-
+      Add the required README sections and order every declared section as the
+      readme shape declares; unlisted sections remain free.
+
+  - id: RSK024
+    title: CHANGELOG.md follows the declared section shape
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: File Shapes
+    enforcement: structural
+    check:
+      kind: markdown_shape
+      config:
+        shape: changelog
+    rationale: >-
+      An always-present Unreleased section gives contributors one obvious place
+      to record a change before it is released.
+    remediation: >-
+      Add an Unreleased section, and keep any Compatibility Policy section
+      ahead of it.
+
+  - id: RSK025
+    title: pyproject.toml declares tables in the canonical order
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: File Shapes
+    enforcement: structural
+    check:
+      kind: toml_table_order
+      config:
+        shape: pyproject
+    rationale: >-
+      A predictable table order keeps related configuration together and stops
+      generated and hand-edited manifests from diverging.
+    remediation: >-
+      Order the declared pyproject tables as the pyproject shape declares;
+      tables the shape does not list may appear anywhere.
+
+  - id: RSK026
+    title: AGENTS.md states the calibrated agent operating dials
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/repo-standard.md
+      section: Agent Operating Mode
+    enforcement: structural
+    check:
+      kind: agents_operating_dials
+      config:
+        path: AGENTS.md
+        section: Agent Operating Mode
+        dials:
+          - label: Verbosity
+            level: 2
+            scale: 5
+          - label: Precision, repeatability, determinism
+            level: 4
+            scale: 5
+    rationale: >-
+      Agent behaviour left to model defaults varies between runs and between
+      repositories, which is the opposite of what a standard is for.
+    remediation: >-
+      State each dial in the Agent Operating Mode section of AGENTS.md, in the
+      declared order and at the declared level.
+
+  - id: RSK027
+    title: Compliance workflow exists
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 5. CI Pull Request Gates
+    enforcement: structural
+    check:
+      kind: path_exists
+      config:
+        path: .github/workflows/compliance.yml
+        path_type: file
+    rationale: >-
+      The job that keeps the rest of the standard from drifting cannot itself
+      go missing unnoticed. Existence is all this rule claims.
+    remediation: >-
+      Add .github/workflows/compliance.yml with a compliance job that checks the
+      repository against repo-standard-kit on pull requests.
+
+  - id: RSK028
+    title: Compliance workflow uses least-privilege permissions
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 5. CI Pull Request Gates
+    enforcement: structural
+    check:
+      kind: github_workflow_permissions
+      config:
+        path: .github/workflows/compliance.yml
+        job: compliance
+        permissions:
+          contents: read
+    rationale: >-
+      The compliance job only reads the repository and reports on it, so a
+      write scope would let the checker it fetches from outside change what it
+      is auditing.
+    remediation: >-
+      Set the compliance job's effective permissions to exactly `contents: read`.
+
+  - id: RSK029
+    title: Compliance workflow pins remote actions immutably
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 5. CI Pull Request Gates
+    enforcement: structural
+    check:
+      kind: github_workflow_pins
+      config:
+        path: .github/workflows/compliance.yml
+    rationale: >-
+      The compliance workflow executes code fetched from outside the
+      repository, so an unpinned action beside it is the widest mutable surface
+      the standard ships.
+    remediation: >-
+      Pin every remote action and reusable workflow in the compliance workflow
+      to a 40-character SHA.
+
+  - id: RSK030
+    title: Compliance workflow invokes the checker
+    level: required
+    profiles: [python-single, python-workspace]
+    source:
+      document: docs/quality-gates.md
+      section: 5. CI Pull Request Gates
+    enforcement: structural
+    check:
+      kind: github_workflow_invocation
+      config:
+        path: .github/workflows/compliance.yml
+        job: compliance
+        trigger: pull_request
+        token: repo-check
+        reusable_workflow: >-
+          JayTeeBat/repo-standard-kit/.github/workflows/compliance-reusable.yml
+        guards_by_profile:
+          python-single: []
+          python-workspace: []
+    rationale: >-
+      An existing, least-privileged, fully pinned compliance workflow can still
+      execute nothing. This rule requires the compliance job to run the checker
+      on pull requests.
+    remediation: >-
+      Trigger the compliance workflow on pull_request, then either run
+      repo-check from a step of its compliance job — unguarded or under a
+      condition policy declares for the profile — or have that job call the
+      reusable workflow this kit publishes, which runs the checker for it.

@@ -1,0 +1,1419 @@
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import tarfile
+import tomllib
+import zipfile
+from collections.abc import Iterable
+from pathlib import Path
+
+import pytest
+from conftest import (
+    REPO_ROOT,
+    documented_ruff_policy,
+    load_yaml,
+    mandatory_ci_commands,
+    required_agents_sections,
+    ruff_config_of,
+)
+
+from repo_standard.bootstrap_defaults import (
+    DEFAULT_PYTHON_VERSION,
+    DEFAULT_UV_BUILD_REQUIREMENT,
+)
+from repo_standard.policy import load_compiled_policy
+from repo_standard.repo_init import (
+    bootstrap_repo,
+    ensure_git_repository,
+    ensure_no_unresolved_placeholders,
+    ensure_output_dir,
+    infer_package_name,
+    infer_repo_name,
+    initialize_git_repository,
+    main,
+    resolve_output_dir,
+    run_optional_installs,
+    validate_package_name,
+    validate_repo_name,
+)
+
+IGNORED_ARTIFACT_PARTS = {
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".ty_cache",
+    "__pycache__",
+}
+
+MANDATORY_CI_COMMANDS = mandatory_ci_commands()
+
+POLICY = load_compiled_policy()
+MANDATORY_PRE_COMMIT_ENTRIES = [
+    hook["entry"] for hook in POLICY.rule("RSK007").check.config["hooks"]
+]
+
+
+STARTER_KIT_PROFILES = ("python-single", "python-workspace")
+
+REUSABLE_COMPLIANCE_WORKFLOW = (
+    REPO_ROOT / ".github" / "workflows" / "compliance-reusable.yml"
+)
+
+STARTER_KIT_ROOT = Path("src") / "repo_standard" / "starter_kits"
+
+ACTION_PIN = re.compile(r"uses: ([^@\s]+)@([0-9a-f]{40})")
+
+
+def starter_kit_dir(profile: str) -> Path:
+    return Path(__file__).resolve().parents[1] / STARTER_KIT_ROOT / profile
+
+
+def starter_workflow_dir(profile: str) -> Path:
+    return starter_kit_dir(profile) / ".github" / "workflows"
+
+
+GOVERNED_WORKFLOWS = (
+    REPO_ROOT / ".github" / "workflows" / "quality.yml",
+    REPO_ROOT / ".github" / "workflows" / "compliance.yml",
+    REUSABLE_COMPLIANCE_WORKFLOW,
+    *(
+        starter_workflow_dir(profile) / name
+        for profile in STARTER_KIT_PROFILES
+        for name in ("quality.yml", "compliance.yml")
+    ),
+)
+
+
+def action_pins(paths: Iterable[Path]) -> dict[str, set[str]]:
+    """Map each pinned remote action to every SHA the given workflows pin it to."""
+    pins: dict[str, set[str]] = {}
+    for path in paths:
+        for action, sha in ACTION_PIN.findall(path.read_text(encoding="utf-8")):
+            pins.setdefault(action, set()).add(sha)
+    return pins
+
+
+def test_bootstrap_repo_renders_python_single_starter(tmp_path: Path) -> None:
+    output_dir = tmp_path / "demo-service"
+
+    bootstrap_repo(
+        profile="python-single",
+        repo_name="demo-service",
+        package_name="demo_service",
+        description="Demo service",
+        repo_type="service",
+        python_version="3.12",
+        author="",
+        license_id=None,
+        output_dir=output_dir,
+        no_lock=True,
+        no_install=True,
+    )
+
+    agents_text = (output_dir / "AGENTS.md").read_text(encoding="utf-8")
+    pyproject_text = (output_dir / "pyproject.toml").read_text(encoding="utf-8")
+    smoke_test_text = (output_dir / "tests" / "test_smoke.py").read_text(
+        encoding="utf-8"
+    )
+    readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
+    workflow_text = (output_dir / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    pre_commit_text = (output_dir / ".pre-commit-config.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "__REPO_NAME__" not in agents_text
+    assert "demo-service" in pyproject_text
+    assert 'importlib.import_module("demo_service")' in smoke_test_text
+    assert "## First 10 Minutes" in readme_text
+    assert (output_dir / ".github" / "workflows" / "quality.yml").exists()
+    assert (output_dir / ".github" / "workflows" / "compliance.yml").exists()
+    assert (output_dir / ".github" / "dependabot.yml").exists()
+    assert pyproject_text.count("[tool.repo-standard]") == 1
+    assert 'profile = "python-single"' in pyproject_text
+    assert f'standard = "{POLICY.standard_major}"' in pyproject_text
+    for command in mandatory_ci_commands("python-single"):
+        assert command in agents_text
+        assert command in workflow_text
+    for entry in MANDATORY_PRE_COMMIT_ENTRIES:
+        assert entry in pre_commit_text
+    assert not (output_dir / ".ruff_cache").exists()
+    assert (output_dir / "src" / "demo_service" / "__init__.py").exists()
+    assert not (output_dir / "src" / "package_name").exists()
+    gitignore_text = (output_dir / ".gitignore").read_text(encoding="utf-8")
+    for entry in (".venv/", "__pycache__/", ".pytest_cache/", ".ruff_cache/", "dist/"):
+        assert entry in gitignore_text
+
+
+def test_bootstrap_repo_infers_package_name_for_python_single(tmp_path: Path) -> None:
+    output_dir = tmp_path / "demo-service"
+
+    bootstrap_repo(
+        profile="python-single",
+        repo_name="demo-service",
+        package_name=None,
+        description="Demo service",
+        repo_type="service",
+        python_version="3.12",
+        author="",
+        license_id=None,
+        output_dir=output_dir,
+        no_lock=True,
+        no_install=True,
+    )
+
+    assert (output_dir / "src" / "demo_service" / "__init__.py").exists()
+
+
+def test_bootstrap_repo_renders_python_workspace_starter(tmp_path: Path) -> None:
+    output_dir = tmp_path / "widget-platform"
+
+    bootstrap_repo(
+        profile="python-workspace",
+        repo_name="widget-platform",
+        package_name=None,
+        description="Workspace repo",
+        repo_type="service",
+        python_version="3.12",
+        author="",
+        license_id=None,
+        output_dir=output_dir,
+        no_lock=True,
+        no_install=True,
+    )
+
+    readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
+    agents_text = (output_dir / "AGENTS.md").read_text(encoding="utf-8")
+    workflow_text = (output_dir / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    pre_commit_text = (output_dir / ".pre-commit-config.yaml").read_text(
+        encoding="utf-8"
+    )
+    pyproject_data = tomllib.loads(
+        (output_dir / "pyproject.toml").read_text(encoding="utf-8")
+    )
+
+    assert "Python workspace" in readme_text
+    assert (output_dir / ".github" / "workflows" / "quality.yml").exists()
+    assert (output_dir / ".github" / "workflows" / "compliance.yml").exists()
+    assert (output_dir / ".github" / "dependabot.yml").exists()
+    assert pyproject_data["tool"]["repo-standard"] == {
+        "profile": "python-workspace",
+        "standard": POLICY.standard_major,
+    }
+    for command in mandatory_ci_commands("python-workspace"):
+        assert command in agents_text
+        assert command in workflow_text
+    for entry in MANDATORY_PRE_COMMIT_ENTRIES:
+        assert entry in pre_commit_text
+    assert not (output_dir / ".ruff_cache").exists()
+    assert (output_dir / "packages" / ".gitkeep").exists()
+    assert not (output_dir / "src").exists()
+    gitignore_text = (output_dir / ".gitignore").read_text(encoding="utf-8")
+    for entry in (".venv/", "__pycache__/", ".pytest_cache/", ".ruff_cache/", "dist/"):
+        assert entry in gitignore_text
+
+    # M1: pytest must not exit 5 (empty collection) before any package exists.
+    assert (output_dir / "tests" / "test_workspace_shell.py").exists()
+    assert pyproject_data["tool"]["pytest"]["ini_options"]["testpaths"] == [
+        "tests",
+        "packages",
+    ]
+
+    # M2: packages/* must be registered as uv workspace members so uv sync
+    # actually installs them, or a package added by repo-add-package is
+    # never importable.
+    assert pyproject_data["tool"]["uv"]["workspace"]["members"] == ["packages/*"]
+
+    # M3: the workspace root carries no distributable artifact of its own,
+    # so `uv build` there cannot silently fall back to the setuptools
+    # default backend; the CI build step scopes to actual packages instead.
+    assert pyproject_data["tool"]["uv"]["package"] is False
+    assert "uv build --all-packages" in workflow_text
+
+
+def test_pre_commit_configs_use_mandatory_local_uv_managed_hooks() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    config_paths = [
+        repo_root / ".pre-commit-config.yaml",
+        *(
+            starter_kit_dir(profile) / ".pre-commit-config.yaml"
+            for profile in STARTER_KIT_PROFILES
+        ),
+    ]
+
+    for config_path in config_paths:
+        text = config_path.read_text(encoding="utf-8")
+        assert "repo: local" in text
+        for entry in MANDATORY_PRE_COMMIT_ENTRIES:
+            assert entry in text
+        assert "ruff-pre-commit" not in text
+
+
+def test_tracked_starter_assets_do_not_contain_cache_artifacts() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["git", "ls-files", STARTER_KIT_ROOT.as_posix()],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    tracked_files = result.stdout.splitlines()
+    assert not any(
+        any(part in IGNORED_ARTIFACT_PARTS for part in path.split("/"))
+        or path.endswith(".pyc")
+        for path in tracked_files
+    )
+
+
+def test_built_wheel_contains_clean_packaged_starter_kits(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+
+    subprocess.run(
+        [
+            "uv",
+            "build",
+            "--wheel",
+            "--out-dir",
+            str(tmp_path),
+            "--no-create-gitignore",
+            "--native-tls",
+        ],
+        cwd=repo_root,
+        check=True,
+    )
+
+    wheel_path = next(tmp_path.glob("repo_standard_kit-*.whl"))
+    with zipfile.ZipFile(wheel_path) as wheel:
+        names = set(wheel.namelist())
+        entry_points_path = next(
+            name for name in names if name.endswith(".dist-info/entry_points.txt")
+        )
+        entry_points = wheel.read(entry_points_path).decode("utf-8")
+
+    assert "repo_standard/starter_kits/python-single/AGENTS.md" in names
+    assert "repo_standard/starter_kits/python-workspace/AGENTS.md" in names
+    assert (
+        "repo_standard/starter_kits/python-single/.github/workflows/compliance.yml"
+        in names
+    )
+    assert (
+        "repo_standard/starter_kits/python-workspace/.github/workflows/compliance.yml"
+        in names
+    )
+    assert "repo_standard/policy/compiled.json" in names
+    assert "repo-adopt = repo_standard.repo_adopt:main" in entry_points
+    assert not any(
+        any(part in IGNORED_ARTIFACT_PARTS for part in name.split("/"))
+        or name.endswith(".pyc")
+        for name in names
+    )
+
+
+def test_built_sdist_contains_source_policy_and_docs(tmp_path: Path) -> None:
+    subprocess.run(
+        [
+            "uv",
+            "build",
+            "--sdist",
+            "--out-dir",
+            str(tmp_path),
+            "--no-create-gitignore",
+            "--native-tls",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+    sdist_path = next(tmp_path.glob("repo_standard_kit-*.tar.gz"))
+    with tarfile.open(sdist_path, "r:gz") as archive:
+        names = set(archive.getnames())
+    assert any(name.endswith("/policy/base.yaml") for name in names)
+    assert any(name.endswith("/docs/policy-reference.md") for name in names)
+
+
+def test_bootstrap_repo_uses_uv_build_backend_for_python_single(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "demo-service"
+
+    bootstrap_repo(
+        profile="python-single",
+        repo_name="demo-service",
+        package_name="demo_service",
+        description="Demo service",
+        repo_type="service",
+        python_version="3.12",
+        author="",
+        license_id=None,
+        output_dir=output_dir,
+        no_lock=True,
+        no_install=True,
+    )
+
+    pyproject_text = (output_dir / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'requires = ["{DEFAULT_UV_BUILD_REQUIREMENT}"]' in pyproject_text
+    assert 'build-backend = "uv_build"' in pyproject_text
+    assert 'module-name = "demo_service"' in pyproject_text
+
+
+@pytest.mark.parametrize("profile", STARTER_KIT_PROFILES)
+def test_starter_python_requirement_matches_bootstrap_default(profile: str) -> None:
+    data = tomllib.loads(
+        (starter_kit_dir(profile) / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert data["project"]["requires-python"] == f">={DEFAULT_PYTHON_VERSION}"
+
+
+def test_python_single_starter_build_requirement_matches_bootstrap_default() -> None:
+    data = tomllib.loads(
+        (starter_kit_dir("python-single") / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert data["build-system"]["requires"] == [DEFAULT_UV_BUILD_REQUIREMENT]
+
+
+QUALITY_WORKFLOWS = (
+    REPO_ROOT / ".github" / "workflows" / "quality.yml",
+    *(
+        starter_workflow_dir(profile) / "quality.yml"
+        for profile in STARTER_KIT_PROFILES
+    ),
+)
+
+
+def test_quality_workflows_use_mandatory_ci_gate_set() -> None:
+    for workflow_path in QUALITY_WORKFLOWS:
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        for command in MANDATORY_CI_COMMANDS:
+            assert command in workflow_text
+
+
+def test_quality_workflows_leave_repo_check_to_the_compliance_status() -> None:
+    """Two required statuses failing on one defect cannot say which failed."""
+    for workflow_path in QUALITY_WORKFLOWS:
+        workflow = load_yaml(workflow_path.read_text(encoding="utf-8"))
+        step = next(
+            step
+            for step in workflow["jobs"]["quality"]["steps"]
+            if "pre-commit run" in str(step.get("run", ""))
+        )
+        assert step.get("env") == {"SKIP": "repo-check"}, workflow_path
+
+
+def test_governed_workflows_pin_each_action_to_a_single_sha() -> None:
+    """A bump to one workflow must not leave a sibling on the old pin."""
+    drifted = {
+        action: sorted(shas)
+        for action, shas in action_pins(GOVERNED_WORKFLOWS).items()
+        if len(shas) > 1
+    }
+
+    assert not drifted, f"action pins disagree across governed workflows: {drifted}"
+
+
+def test_dependabot_watches_every_workflow_directory_the_kit_ships() -> None:
+    """`directory: /` only expands to the root `.github/workflows`."""
+    config = load_yaml((REPO_ROOT / ".github" / "dependabot.yml").read_text("utf-8"))
+    watched = {
+        update["directory"]
+        for update in config["updates"]
+        if update["package-ecosystem"] == "github-actions"
+    }
+
+    expected = {"/"} | {
+        "/" + starter_workflow_dir(profile).relative_to(REPO_ROOT).as_posix()
+        for profile in STARTER_KIT_PROFILES
+    }
+    assert watched == expected
+
+
+def test_compliance_workflows_emit_an_independent_required_status() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow_paths = [
+        repo_root / ".github" / "workflows" / "compliance.yml",
+        *(
+            starter_kit_dir(profile) / ".github" / "workflows" / "compliance.yml"
+            for profile in STARTER_KIT_PROFILES
+        ),
+    ]
+
+    for workflow_path in workflow_paths:
+        assert workflow_path.name == "compliance.yml"
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        assert "  pull_request:\n" in workflow_text
+        assert "permissions:\n  contents: read\n" in workflow_text
+        assert "  compliance:\n    name: compliance\n" in workflow_text
+        # Agreement between files is a separate claim, made across every
+        # governed workflow rather than only these three.
+        assert set(action_pins([workflow_path])) == {
+            "actions/checkout",
+            "astral-sh/setup-uv",
+        }
+
+    root_workflow = workflow_paths[0].read_text(encoding="utf-8")
+    assert "  workflow_call:\n" not in root_workflow
+    assert "uv run --locked --no-dev repo-check ." in root_workflow
+    version = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["version"]
+    for workflow_path in workflow_paths[1:]:
+        assert f"repo-standard-kit.git@v{version}" in workflow_path.read_text(
+            encoding="utf-8"
+        )
+
+
+@pytest.mark.parametrize("profile", STARTER_KIT_PROFILES)
+def test_documented_required_workflow_is_the_shape_the_kits_ship(profile: str) -> None:
+    """The prescribed shape and the shipped starter must not drift apart."""
+    starter = (
+        starter_kit_dir(profile) / ".github" / "workflows" / "compliance.yml"
+    ).read_text(encoding="utf-8")
+    documented = re.findall(
+        r"```yaml\n(.*?)```",
+        (REPO_ROOT / "docs" / "compliance.md").read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+
+    assert starter in documented
+
+
+def test_reusable_compliance_workflow_is_the_only_workflow_call_surface() -> None:
+    workflow_text = REUSABLE_COMPLIANCE_WORKFLOW.read_text(encoding="utf-8")
+    workflow = load_yaml(workflow_text)
+
+    assert set(workflow["on"]) == {"workflow_call"}
+    # The one input selects which checker runs. Tuning what it checks is the
+    # uvx-direct form's job, which is why that form is the prescribed one.
+    assert set(workflow["on"]["workflow_call"]["inputs"]) == {"standard-ref"}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "  compliance:\n    name: compliance\n" in workflow_text
+    assert "uvx \\" in workflow_text
+
+
+def test_reusable_compliance_workflow_keeps_inputs_out_of_shell_source() -> None:
+    workflow_text = REUSABLE_COMPLIANCE_WORKFLOW.read_text(encoding="utf-8")
+    workflow = load_yaml(workflow_text)
+    run_step = next(
+        step
+        for step in workflow["jobs"]["compliance"]["steps"]
+        if step.get("name") == "Run repo-check"
+    )
+
+    assert run_step["env"] == {"REPO_STANDARD_REF": "${{ inputs.standard-ref }}"}
+    run = run_step["run"]
+    assert "${{ inputs." not in run
+    assert "$REPO_STANDARD_REF" in run
+
+
+def test_reusable_compliance_workflow_step_holds_no_conditional() -> None:
+    """One input that only selects a ref leaves nothing for the step to decide."""
+    workflow = load_yaml(REUSABLE_COMPLIANCE_WORKFLOW.read_text(encoding="utf-8"))
+    run = next(
+        step["run"]
+        for step in workflow["jobs"]["compliance"]["steps"]
+        if step.get("name") == "Run repo-check"
+    )
+
+    assert not re.search(r"\b(if|elif|else|fi|case|esac|for|while)\b", run)
+
+
+def _reusable_workflow_argv(tmp_path: Path, standard_ref: str) -> tuple[str, ...]:
+    """Execute the reusable workflow's step against a uvx stub, returning argv."""
+    workflow = load_yaml(REUSABLE_COMPLIANCE_WORKFLOW.read_text(encoding="utf-8"))
+    run = next(
+        step["run"]
+        for step in workflow["jobs"]["compliance"]["steps"]
+        if step.get("name") == "Run repo-check"
+    )
+
+    bash = shutil.which("bash")
+    if os.name == "nt":
+        git_bash = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / (
+            "Git/bin/bash.exe"
+        )
+        if git_bash.is_file():
+            bash = str(git_bash)
+    if bash is None:
+        pytest.skip("Bash is required to execute the reusable-workflow step")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "uvx"
+    stub.write_text(
+        '#!/usr/bin/env bash\nfor a in "$@"; do printf "%s\\n" "$a"; done\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    stub.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": os.pathsep.join((str(bin_dir), env["PATH"])),
+            "REPO_STANDARD_REF": standard_ref,
+        }
+    )
+    result = subprocess.run(
+        [bash, "-c", run],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return tuple(result.stdout.splitlines())
+
+
+def test_reusable_compliance_workflow_runs_one_fixed_command(tmp_path: Path) -> None:
+    """The ref is the only thing a caller can move; the argv is otherwise fixed."""
+    assert _reusable_workflow_argv(tmp_path, "v1.2.0") == (
+        "--from",
+        "git+https://github.com/JayTeeBat/repo-standard-kit.git@v1.2.0",
+        "repo-check",
+        ".",
+    )
+
+
+def test_reusable_compliance_workflow_cannot_be_escaped_by_a_hostile_ref(
+    tmp_path: Path,
+) -> None:
+    """A ref is quoted into one argument, so shell metacharacters stay inert.
+
+    This is why the step needs no character allowlist of its own: nothing a
+    caller supplies is ever parsed as Bash, so there is no escape to reject.
+    """
+    argv = _reusable_workflow_argv(tmp_path, "v1.2.0; rm -rf /")
+
+    assert argv == (
+        "--from",
+        "git+https://github.com/JayTeeBat/repo-standard-kit.git@v1.2.0; rm -rf /",
+        "repo-check",
+        ".",
+    )
+
+
+def test_root_pyproject_uses_uv_build_backend() -> None:
+    pyproject_text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert f'requires = ["{DEFAULT_UV_BUILD_REQUIREMENT}"]' in pyproject_text
+    assert 'build-backend = "uv_build"' in pyproject_text
+    assert 'module-name = "repo_standard"' in pyproject_text
+    assert "source-exclude" in pyproject_text
+    assert "[tool.hatch" not in pyproject_text
+
+
+def test_validate_package_name_rejects_invalid_identifier() -> None:
+    with pytest.raises(ValueError, match="valid Python identifier"):
+        validate_package_name("not-valid")
+
+
+def test_infer_package_name_normalizes_repo_name() -> None:
+    assert infer_package_name("widget-api") == "widget_api"
+
+
+def test_infer_repo_name_uses_target_directory_name(tmp_path: Path) -> None:
+    assert infer_repo_name(tmp_path / "widget-platform") == "widget-platform"
+
+
+def test_validate_repo_name_rejects_path_like_values() -> None:
+    with pytest.raises(ValueError, match="must be a repository name, not a path"):
+        validate_repo_name("foo/bar")
+
+
+def test_resolve_output_dir_uses_repo_name_when_output_dir_not_provided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert resolve_output_dir(None, "widget-platform") == tmp_path / "widget-platform"
+
+
+def test_resolve_output_dir_prefers_explicit_output_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert resolve_output_dir("custom-target", "widget-platform") == (
+        tmp_path / "custom-target"
+    )
+
+
+def test_ensure_git_repository_initializes_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        assert check is True
+        calls.append((command, cwd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ensure_git_repository(tmp_path)
+
+    assert calls == [(["git", "init", "--initial-branch=main"], tmp_path)]
+    assert "Initialized a local Git repository on main" in capsys.readouterr().err
+
+
+def test_initialize_git_repository_falls_back_when_initial_branch_flag_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        assert check is True
+        calls.append((command, cwd))
+        if command == ["git", "init", "--initial-branch=main"]:
+            raise subprocess.CalledProcessError(returncode=129, cmd=command)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    initialize_git_repository(tmp_path)
+
+    assert calls == [
+        (["git", "init", "--initial-branch=main"], tmp_path),
+        (["git", "init"], tmp_path),
+        (["git", "branch", "-m", "main"], tmp_path),
+    ]
+
+
+def test_ensure_git_repository_skips_existing_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+
+    def fail_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        raise AssertionError(f"subprocess.run should not be called: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    ensure_git_repository(tmp_path)
+
+
+def test_ensure_git_repository_raises_clear_error_when_git_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing_git(command: list[str], *, cwd: Path, check: bool) -> None:
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(subprocess, "run", missing_git)
+
+    with pytest.raises(RuntimeError, match="Install Git or rerun with --no-install"):
+        ensure_git_repository(tmp_path)
+
+
+def test_run_optional_installs_initializes_git_before_pre_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        assert check is True
+        calls.append((command, cwd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    run_optional_installs(tmp_path)
+
+    assert calls == [
+        (["uv", "sync"], tmp_path),
+        (["git", "init", "--initial-branch=main"], tmp_path),
+        (["uv", "run", "pre-commit", "install"], tmp_path),
+    ]
+    assert "Initialized a local Git repository on main" in capsys.readouterr().err
+
+
+def test_run_optional_installs_skips_git_init_inside_existing_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        assert check is True
+        calls.append((command, cwd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    run_optional_installs(tmp_path)
+
+    assert calls == [
+        (["uv", "sync"], tmp_path),
+        (["uv", "run", "pre-commit", "install"], tmp_path),
+    ]
+
+
+def test_ensure_output_dir_rejects_non_empty_directory(tmp_path: Path) -> None:
+    output_dir = tmp_path / "existing"
+    output_dir.mkdir()
+    (output_dir / "marker.txt").write_text("x", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not empty"):
+        ensure_output_dir(output_dir)
+
+
+def test_ensure_no_unresolved_placeholders_rejects_leftovers(tmp_path: Path) -> None:
+    file_path = tmp_path / "README.md"
+    file_path.write_text("leftover __REPO_NAME__", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unresolved placeholders remain"):
+        ensure_no_unresolved_placeholders(tmp_path)
+
+
+def test_main_bootstraps_into_current_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(
+        [
+            "--profile",
+            "python-single",
+            "--no-lock",
+            "--no-install",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (tmp_path / "AGENTS.md").exists()
+    inferred_package = tmp_path.name.replace("-", "_")
+    assert (tmp_path / "src" / inferred_package / "__init__.py").exists()
+    readme_text = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert "Describe this repository." in readme_text
+
+
+def test_main_infers_repo_name_from_output_dir(tmp_path: Path) -> None:
+    output_dir = tmp_path / "inferred-service"
+
+    exit_code = main(
+        [
+            "--profile",
+            "python-single",
+            "--output-dir",
+            str(output_dir),
+            "--no-lock",
+            "--no-install",
+        ]
+    )
+
+    assert exit_code == 0
+    readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
+    assert "# inferred-service" in readme_text
+    assert (output_dir / "src" / "inferred_service" / "__init__.py").exists()
+    assert "Describe this repository." in readme_text
+
+
+def test_main_creates_repo_named_directory_when_repo_name_is_provided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(
+        [
+            "--profile",
+            "python-single",
+            "--repo-name",
+            "demo-service",
+            "--no-lock",
+            "--no-install",
+        ]
+    )
+
+    output_dir = tmp_path / "demo-service"
+    assert exit_code == 0
+    assert (output_dir / "AGENTS.md").exists()
+    assert (output_dir / "src" / "demo_service" / "__init__.py").exists()
+    readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
+    assert "# demo-service" in readme_text
+
+
+def test_main_uses_explicit_output_dir_when_repo_name_is_also_provided(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "custom-target"
+
+    exit_code = main(
+        [
+            "--profile",
+            "python-single",
+            "--repo-name",
+            "demo-service",
+            "--output-dir",
+            str(output_dir),
+            "--no-lock",
+            "--no-install",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (output_dir / "AGENTS.md").exists()
+    assert (output_dir / "src" / "demo_service" / "__init__.py").exists()
+    readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
+    assert "# demo-service" in readme_text
+
+
+def test_main_rejects_path_like_repo_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="must be a repository name, not a path"):
+        main(
+            [
+                "--profile",
+                "python-single",
+                "--repo-name",
+                "foo/bar",
+                "--no-lock",
+                "--no-install",
+            ]
+        )
+
+
+def test_main_infers_workspace_repo_name_from_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_dir = tmp_path / "widget-platform"
+    workspace_dir.mkdir()
+    monkeypatch.chdir(workspace_dir)
+
+    exit_code = main(
+        [
+            "--profile",
+            "python-workspace",
+            "--no-lock",
+            "--no-install",
+        ]
+    )
+
+    assert exit_code == 0
+    readme_text = (workspace_dir / "README.md").read_text(encoding="utf-8")
+    assert "# widget-platform" in readme_text
+    assert (workspace_dir / "packages" / ".gitkeep").exists()
+    assert "Describe this repository." in readme_text
+
+
+def _headings(path: Path) -> list[str]:
+    return re.findall(
+        r"^##\s+(.+?)\s*$", path.read_text(encoding="utf-8"), re.MULTILINE
+    )
+
+
+@pytest.mark.parametrize(
+    "agents_path",
+    [
+        Path("AGENTS.md"),
+        Path("templates/AGENTS.md"),
+        *(
+            starter_kit_dir(p).relative_to(REPO_ROOT) / "AGENTS.md"
+            for p in STARTER_KIT_PROFILES
+        ),
+    ],
+    ids=["repo-root", "template", "starter-single", "starter-workspace"],
+)
+def test_shipped_agents_files_carry_every_required_section(agents_path: Path) -> None:
+    """Every AGENTS.md we ship carries the sections docs/repo-standard.md mandates."""
+    headings = _headings(REPO_ROOT / agents_path)
+    missing = [s for s in required_agents_sections() if s not in headings]
+    assert not missing, f"{agents_path} is missing required sections: {missing}"
+
+
+@pytest.mark.parametrize("profile", STARTER_KIT_PROFILES)
+def test_generated_agents_files_carry_every_required_section(
+    profile: str, tmp_path: Path
+) -> None:
+    output_dir = tmp_path / "generated"
+    bootstrap_repo(
+        profile=profile,
+        repo_name="generated",
+        package_name=None,
+        description="Generated repo",
+        repo_type="service",
+        python_version="3.12",
+        author="",
+        license_id=None,
+        output_dir=output_dir,
+        no_lock=True,
+        no_install=True,
+    )
+    headings = _headings(output_dir / "AGENTS.md")
+    missing = [s for s in required_agents_sections() if s not in headings]
+    assert not missing, f"generated {profile} AGENTS.md is missing: {missing}"
+
+
+def test_gate_chain_is_defined_by_the_normative_document() -> None:
+    """The chain must come from docs/quality-gates.md, not a literal in this file."""
+    for profile in STARTER_KIT_PROFILES:
+        commands = mandatory_ci_commands(profile)
+        assert commands[0] == "uv sync --locked", (
+            "the chain must start by verifying a reproducible environment"
+        )
+        assert commands[-1].startswith("uv build"), (
+            "the chain must end with build validation"
+        )
+        assert len(commands) == len(set(commands)), "duplicate gate in the spec"
+
+
+def test_starter_kit_profiles_are_declared_by_canonical_policy() -> None:
+    """Profile identity lives in policy, not an unconsumed Markdown mirror."""
+    assert STARTER_KIT_PROFILES == POLICY.profile_ids
+
+
+@pytest.mark.parametrize(
+    ("agents_path", "profile"),
+    [
+        (Path("AGENTS.md"), "python-single"),
+        (Path("templates/AGENTS.md"), "python-single"),
+        *(
+            (starter_kit_dir(p).relative_to(REPO_ROOT) / "AGENTS.md", p)
+            for p in STARTER_KIT_PROFILES
+        ),
+    ],
+    ids=["repo-root", "template", "starter-single", "starter-workspace"],
+)
+def test_shipped_agents_files_state_the_exact_gate_chain(
+    agents_path: Path, profile: str
+) -> None:
+    """The contract requires exact gate commands in AGENTS.md; hold each copy to it."""
+    text = (REPO_ROOT / agents_path).read_text(encoding="utf-8")
+    missing = [c for c in mandatory_ci_commands(profile) if c not in text]
+    assert not missing, f"{agents_path} omits mandatory gates: {missing}"
+
+
+def test_readme_template_defers_to_agents_for_the_gate_chain() -> None:
+    """The README template's Quality Gates section points at AGENTS.md.
+
+    Onboarding aids elsewhere in the template - the common-commands table, the
+    setup steps - may name individual commands. What must not exist is a second
+    authoritative copy of the chain competing with the one AGENTS.md carries.
+    """
+    text = (REPO_ROOT / "templates" / "README.md").read_text(encoding="utf-8")
+    heading = "### Quality Gates"
+    assert heading in text, "templates/README.md lost its Quality Gates section"
+    section = text.split(heading, 1)[1].split("\n### ", 1)[0]
+
+    restated = [c for c in mandatory_ci_commands() if c in section]
+    assert not restated, (
+        "templates/README.md restates the gate chain instead of deferring to "
+        f"AGENTS.md: {restated}"
+    )
+    assert "AGENTS.md" in section, (
+        "the Quality Gates section must point at AGENTS.md for the chain"
+    )
+
+
+def test_quality_gates_sections_are_sequentially_numbered() -> None:
+    """Other documents cite this spec by section number; numbering must stay stable."""
+    text = (REPO_ROOT / "docs" / "quality-gates.md").read_text(encoding="utf-8")
+    numbers = [int(n) for n in re.findall(r"^##\s+(\d+)\.\s", text, re.MULTILINE)]
+    assert numbers, "quality-gates.md lost its numbered sections"
+    assert numbers == list(range(1, len(numbers) + 1)), (
+        f"sections must run 1..N with no gaps or reordering, got {numbers}"
+    )
+
+
+def test_every_cited_spec_section_exists() -> None:
+    """A §N reference anywhere in the repo must resolve to a real section."""
+    spec = (REPO_ROOT / "docs" / "quality-gates.md").read_text(encoding="utf-8")
+    existing = {int(n) for n in re.findall(r"^##\s+(\d+)\.\s", spec, re.MULTILINE)}
+
+    dangling: list[str] = []
+    for path in REPO_ROOT.rglob("*.md"):
+        if any(part in {".venv", "dist", "node_modules"} for part in path.parts):
+            continue
+        for cited in re.findall(r"§(\d+)", path.read_text(encoding="utf-8")):
+            if int(cited) not in existing:
+                dangling.append(f"{path.relative_to(REPO_ROOT)} cites §{cited}")
+    assert not dangling, f"dangling spec citations: {dangling}"
+
+
+def test_version_pin_examples_match_the_package_version() -> None:
+    """Docs show a pinned install; the pin must be this version, not a stale one.
+
+    This example has silently gone stale on every release so far. Asserting it
+    against pyproject.toml turns "remember to bump the docs" into a gate.
+    """
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    version_match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert version_match, "could not read version from pyproject.toml"
+    version = version_match.group(1)
+
+    stale: list[str] = []
+    for name in ("README.md", "docs/bootstrap-workflow.md"):
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        for pinned in re.findall(r"repo-standard-kit\.git@v([0-9][^\"\s]*)", text):
+            if pinned != version:
+                stale.append(f"{name} pins v{pinned}, package is {version}")
+    assert not stale, f"stale version-pin examples: {stale}"
+
+
+@pytest.mark.parametrize("profile", STARTER_KIT_PROFILES)
+def test_starter_kit_repo_check_hook_pin_matches_the_package_version(
+    profile: str,
+) -> None:
+    """The wired-in repo-check pre-commit hook must pin this same version."""
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    version_match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert version_match, "could not read version from pyproject.toml"
+    version = version_match.group(1)
+
+    text = (starter_kit_dir(profile) / ".pre-commit-config.yaml").read_text(
+        encoding="utf-8"
+    )
+    rev_match = re.search(
+        r"repo: https://github\.com/JayTeeBat/repo-standard-kit"
+        r"\s*\n\s*rev: v([0-9][^\s]*)",
+        text,
+    )
+    assert rev_match, f"{profile} starter kit does not wire in the repo-check hook"
+    assert rev_match.group(1) == version, (
+        f"{profile} starter kit pins v{rev_match.group(1)}, package is {version}"
+    )
+    compliance = (
+        starter_kit_dir(profile) / ".github" / "workflows" / "compliance.yml"
+    ).read_text(encoding="utf-8")
+    assert f"repo-standard-kit.git@v{version}" in compliance
+
+
+@pytest.mark.parametrize(
+    "pyproject_path",
+    [
+        Path("pyproject.toml"),
+        *(
+            starter_kit_dir(p).relative_to(REPO_ROOT) / "pyproject.toml"
+            for p in STARTER_KIT_PROFILES
+        ),
+    ],
+    ids=["repo-root", "starter-single", "starter-workspace"],
+)
+def test_ruff_config_matches_the_documented_baseline(pyproject_path: Path) -> None:
+    """Passing the format gate is not enough; the config behind it must be the same.
+
+    repo-standard-kit's own repos hold themselves to the full recommended
+    baseline (§13) — line-length 88 and the PT family — not just the
+    mandatory floor every adopter must clear.
+    """
+    policy = documented_ruff_policy()
+    actual = ruff_config_of(REPO_ROOT / pyproject_path)
+
+    missing = set(policy.mandatory_select) - set(actual.select)
+    assert not missing, (
+        f"{pyproject_path} drops required rule families: {sorted(missing)}"
+    )
+    assert actual.line_length == policy.recommended_line_length, (
+        f"{pyproject_path} sets line-length {actual.line_length}, "
+        f"recommended baseline is {policy.recommended_line_length}"
+    )
+    missing_recommended = set(policy.recommended_select) - set(actual.select)
+    assert not missing_recommended, (
+        f"{pyproject_path} drops recommended rule families: "
+        f"{sorted(missing_recommended)}"
+    )
+
+
+# --- optional bootstrap metadata: python version, author, licence ---------
+
+
+def _bootstrap(tmp_path: Path, **overrides: object) -> Path:
+    output_dir = tmp_path / "generated"
+    arguments: dict[str, object] = {
+        "profile": "python-single",
+        "repo_name": "generated",
+        "package_name": None,
+        "description": "Generated repo",
+        "repo_type": "service",
+        "python_version": "3.12",
+        "author": "",
+        "license_id": None,
+        "output_dir": output_dir,
+        "no_lock": True,
+        "no_install": True,
+    }
+    arguments.update(overrides)
+    bootstrap_repo(**arguments)  # type: ignore[arg-type]
+    return output_dir
+
+
+@pytest.mark.parametrize("profile", STARTER_KIT_PROFILES)
+def test_python_version_flows_through_the_declared_placeholder(
+    profile: str, tmp_path: Path
+) -> None:
+    """--python-version must drive both surfaces that state the requirement.
+
+    `requires-python` is set structurally so the starter manifest stays a
+    parseable pyproject.toml, and the README states the same value through the
+    declared RSK011 token, which no shipped file used to contain.
+    """
+    starter_readme = (starter_kit_dir(profile) / "README.md").read_text(
+        encoding="utf-8"
+    )
+    assert "__PYTHON_VERSION__" in starter_readme
+
+    output_dir = _bootstrap(tmp_path, profile=profile, python_version="3.13")
+    data = tomllib.loads((output_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["requires-python"] == ">=3.13"
+    assert "Python `3.13` or newer" in (output_dir / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_bootstrap_serializes_special_project_metadata(tmp_path: Path) -> None:
+    output_dir = _bootstrap(
+        tmp_path,
+        description='A "quoted" service\nwith Unicode: é.',
+        author='Ada "A" Lovelace',
+    )
+
+    data = tomllib.loads((output_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["description"] == 'A "quoted" service\nwith Unicode: é.'
+    assert data["project"]["authors"] == [{"name": 'Ada "A" Lovelace'}]
+
+
+def test_author_is_rendered_into_project_metadata(tmp_path: Path) -> None:
+    output_dir = _bootstrap(tmp_path, author="Ada Lovelace")
+    data = tomllib.loads((output_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["authors"] == [{"name": "Ada Lovelace"}]
+
+
+def test_unnamed_author_leaves_no_empty_metadata(tmp_path: Path) -> None:
+    output_dir = _bootstrap(tmp_path, author="")
+    data = tomllib.loads((output_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "authors" not in data["project"]
+
+
+@pytest.mark.parametrize(
+    ("license_id", "expression", "marker"),
+    [
+        ("proprietary", "LicenseRef-Proprietary", "All rights reserved"),
+        ("mit", "MIT", "MIT License"),
+        ("apache-2.0", "Apache-2.0", "Apache License"),
+    ],
+)
+def test_selected_license_is_written_and_declared(
+    tmp_path: Path, license_id: str, expression: str, marker: str
+) -> None:
+    output_dir = _bootstrap(tmp_path, license_id=license_id, author="Ada Lovelace")
+
+    license_text = (output_dir / "LICENSE").read_text(encoding="utf-8")
+    assert marker in license_text
+    assert "__COPYRIGHT_HOLDER__" not in license_text
+    assert "__COPYRIGHT_YEAR__" not in license_text
+
+    data = tomllib.loads((output_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["license"] == expression
+    assert data["project"]["license-files"] == ["LICENSE"]
+    assert "See [`LICENSE`](LICENSE)" in (output_dir / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_omitted_license_states_terms_are_unselected_and_cites_rsk018(
+    tmp_path: Path,
+) -> None:
+    """No placeholder token is left behind, so RSK011 stays satisfied."""
+    output_dir = _bootstrap(tmp_path, license_id=None)
+
+    assert not (output_dir / "LICENSE").exists()
+    data = tomllib.loads((output_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "license" not in data["project"]
+
+    section = (output_dir / "README.md").read_text(encoding="utf-8").split("## License")
+    assert len(section) == 2
+    assert "RSK018" in section[1]
+    assert "__" not in section[1].split("[repo-standard-kit]:")[0]
+
+
+# --- lock file contract: --no-lock and --no-install are independent -------
+
+
+def _record_bootstrap_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    output_dir: Path,
+    *,
+    uv_failure: Exception | None = None,
+) -> list[list[str]]:
+    """Record the commands bootstrap would run without executing any of them.
+
+    `uv lock` and `uv sync` both resolve dependencies over the network, so the
+    stub stands in for them and writes the lock file they would leave behind.
+    """
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        assert check is True
+        assert cwd == output_dir
+        commands.append(command)
+        if uv_failure is not None and command[0] == "uv":
+            raise uv_failure
+        if command[:2] in (["uv", "lock"], ["uv", "sync"]):
+            (output_dir / "uv.lock").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return commands
+
+
+def test_no_install_alone_still_produces_a_lock_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RSK009 requires uv.lock, so skipping installation must not skip locking."""
+    commands = _record_bootstrap_commands(monkeypatch, tmp_path / "generated")
+
+    output_dir = _bootstrap(tmp_path, no_lock=False, no_install=True)
+
+    assert commands == [["uv", "lock"]]
+    assert (output_dir / "uv.lock").is_file()
+    assert "RSK009" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("no_lock", "no_install", "expected"),
+    [
+        (
+            False,
+            False,
+            [
+                ["uv", "lock"],
+                ["uv", "sync"],
+                ["git", "init", "--initial-branch=main"],
+                ["uv", "run", "pre-commit", "install"],
+            ],
+        ),
+        (False, True, [["uv", "lock"]]),
+        (
+            True,
+            False,
+            [
+                ["uv", "sync"],
+                ["git", "init", "--initial-branch=main"],
+                ["uv", "run", "pre-commit", "install"],
+            ],
+        ),
+        (True, True, []),
+    ],
+    ids=["default", "no-install", "no-lock", "both"],
+)
+def test_lock_and_install_flags_are_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_lock: bool,
+    no_install: bool,
+    expected: list[list[str]],
+) -> None:
+    commands = _record_bootstrap_commands(monkeypatch, tmp_path / "generated")
+
+    _bootstrap(tmp_path, no_lock=no_lock, no_install=no_install)
+
+    assert commands == expected
+
+
+def test_skipping_both_steps_reports_the_rsk009_next_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _record_bootstrap_commands(monkeypatch, tmp_path / "generated")
+
+    output_dir = _bootstrap(tmp_path, no_lock=True, no_install=True)
+
+    error = capsys.readouterr().err
+    assert not (output_dir / "uv.lock").exists()
+    assert "RSK009" in error
+    assert "uv lock" in error
+
+
+@pytest.mark.parametrize(
+    ("uv_failure", "expected_notice"),
+    [
+        (
+            FileNotFoundError("uv"),
+            "Skipped uv lock because the executable was not found.",
+        ),
+        (
+            subprocess.CalledProcessError(2, ["uv", "lock"]),
+            "uv lock failed with exit status 2.",
+        ),
+    ],
+    ids=["uv-missing", "uv-lock-failed"],
+)
+def test_a_failed_lock_step_reports_the_rsk009_next_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    uv_failure: Exception,
+    expected_notice: str,
+) -> None:
+    """The warning covers every path that ends without a lock file, not the flags."""
+    _record_bootstrap_commands(
+        monkeypatch, tmp_path / "generated", uv_failure=uv_failure
+    )
+
+    output_dir = _bootstrap(tmp_path, no_lock=False, no_install=True)
+
+    error = capsys.readouterr().err
+    assert not (output_dir / "uv.lock").exists()
+    assert expected_notice in error
+    assert "RSK009" in error
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_notice"),
+    [
+        (
+            FileNotFoundError("uv"),
+            "Skipped uv sync because the executable was not found.",
+        ),
+        (
+            subprocess.CalledProcessError(2, ["uv", "sync"]),
+            "uv sync failed with exit status 2.",
+        ),
+    ],
+    ids=["uv-missing", "uv-sync-failed"],
+)
+def test_a_failed_install_step_is_reported_like_a_failed_lock_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+    expected_notice: str,
+) -> None:
+    """Both optional steps fail alike: stderr keeps the reason, nothing aborts."""
+
+    def fake_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert run_optional_installs(tmp_path) is False
+    assert expected_notice in capsys.readouterr().err
+
+
+def test_main_exits_non_zero_when_an_optional_step_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generated repository whose lock or sync failed must not report success."""
+
+    def fake_run(command: list[str], *, cwd: Path, check: bool) -> None:
+        raise subprocess.CalledProcessError(2, command)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = main(
+        [
+            "--profile",
+            "python-single",
+            "--repo-name",
+            "demo-service",
+            "--output-dir",
+            str(tmp_path / "demo-service"),
+            "--no-install",
+        ]
+    )
+
+    assert exit_code == 1

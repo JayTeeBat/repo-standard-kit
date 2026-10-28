@@ -1,0 +1,42 @@
+[project]
+name = "__REPO_NAME__"
+version = "0.1.0"
+description = "__DESCRIPTION__"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "__AUTHOR__" }]
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "detect-secrets>=1.5.0",
+  "pre-commit>=4.0.0",
+  "pre-commit-hooks>=5.0.0",
+  "pymarkdownlnt>=0.9.39",
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+  "ty>=0.0.1a16",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "__PACKAGE_NAME__"
+
+[tool.repo-standard]
+profile = "python-single"
+standard = "2"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "PT"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ty.src]
+include = ["src", "tests"]
