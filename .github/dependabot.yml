@@ -1,18 +1,24 @@
 version: 2
+# One weekly PR for the whole repository: a multi-ecosystem group combines
+# every entry assigned to it into a single pull request.
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: weekly
 updates:
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   # The pins this repository hands to adopters live inside the starter kits, and
   # Dependabot only expands `directory: /` into `.github/workflows`. Every other
   # directory is scanned as-is, so each starter kit registers its workflow
   # directory itself.
   - package-ecosystem: github-actions
     directory: /src/repo_standard/starter_kits/python-single/.github/workflows
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: github-actions
     directory: /src/repo_standard/starter_kits/python-workspace/.github/workflows
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
